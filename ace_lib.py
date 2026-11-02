@@ -23,11 +23,39 @@ from helpful_functions import (
 
 DEV = False
 
+_UNSET = object()
+
+Category = Optional[
+    Literal[
+        "PRICE_REVERSION",
+        "PRICE_MOMENTUM",
+        "VOLUME",
+        "FUNDAMENTAL",
+        "ANALYST",
+        "PRICE_VOLUME",
+        "RELATION",
+        "SENTIMENT",
+    ]
+]
+
 
 class SingleSession(requests.Session):
+    _instance = None
+    _lock = threading.Lock()
+    _relogin_lock = threading.Lock()
+    _initialized = False
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._relogin_lock = threading.Lock()
+        if not self._initialized:
+            super(SingleSession, self).__init__(*args, **kwargs)
+            self._initialized = True
 
     def get_relogin_lock(self):
         return self._relogin_lock
@@ -58,11 +86,10 @@ def setup_logger() -> logging.Logger:
 
     logger.addHandler(console_handler)
 
-    if DEV:
-        file_handler = logging.FileHandler("ace.log")
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+    file_handler = logging.FileHandler("ace.log")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
     return logger
 
@@ -121,10 +148,7 @@ def get_credentials() -> tuple[str, str]:
     return (data["email"], data["password"])
 
 
-def start_session(
-    credentials: Optional[tuple[str, str]] = None,
-    session: Optional[SingleSession] = None,
-) -> SingleSession:
+def start_session() -> SingleSession:
     """
     Start a new session with the WorldQuant BRAIN platform.
 
@@ -134,23 +158,16 @@ def start_session(
     Returns:
         SingleSession: An authenticated session object.
 
-    Args:
-        credentials: Optional email and password pair. When provided, credentials
-            are used directly and rejected credentials raise instead of prompting.
-        session: Optional existing session to reauthenticate in place.
-
     Raises:
         requests.exceptions.RequestException: If there's an error during the authentication process.
     """
 
-    s = session if session is not None else SingleSession()
-    s.auth = credentials if credentials is not None else get_credentials()
+    s = SingleSession()
+    s.auth = get_credentials()
     r = s.post(brain_api_url + "/authentication")
     logger.debug(f"New session created (ID: {id(s)}) with authentication response: {r.status_code}, {r.json()}")
     if r.status_code == requests.status_codes.codes.unauthorized:
-        if r.headers.get("WWW-Authenticate") == "persona":
-            if credentials is not None:
-                raise RuntimeError("Biometric approval is required; sign in again through the web app.")
+        if r.headers["WWW-Authenticate"] == "persona":
             print(
                 "Complete biometrics authentication and press any key to continue: \n"
                 + urljoin(r.url, r.headers["Location"])
@@ -168,8 +185,6 @@ def start_session(
                     break
         else:
             logger.error("\nIncorrect email or password\n")
-            if credentials is not None:
-                raise PermissionError("The WorldQuant BRAIN email or password was rejected.")
             with open(
                 os.path.join(os.path.expanduser("~"), "secrets/platform-brain.json"),
                 "w",
@@ -218,6 +233,7 @@ def generate_alpha(
     selection_handling: str = "POSITIVE",
     selection_limit: int = 100,
     visualization: bool = False,
+    simulation_mode: Literal["FULL", "QUICK"] = "FULL",
 ) -> dict:
     """
     Generate an alpha dictionary for simulation. If alpha_type='REGULAR',
@@ -243,6 +259,7 @@ def generate_alpha(
         selection_handling (str, optional): The selection handling method for super alphas. Defaults to "POSITIVE".
         selection_limit (int, optional): The selection limit for super alphas. Defaults to 100.
         visualization (bool, optional): Whether to include visualization. Defaults to False.
+        simulation_mode (str, optional): The simulation mode ("FULL" or "QUICK"). Defaults to "FULL".
 
     Returns:
         dict: A dictionary containing the alpha configuration for simulation.
@@ -266,6 +283,7 @@ def generate_alpha(
         "maxTrade": max_trade,
         "language": "FASTEXPR",
         "visualization": visualization,
+        "simulationMode": simulation_mode,
     }
     if alpha_type == "REGULAR":
         simulation_data = {
@@ -310,19 +328,12 @@ def check_session_and_relogin(s: SingleSession) -> SingleSession:
     with s.get_relogin_lock():
         if check_session_timeout(s) < 2000:
             logger.debug('Session less than 2000 seconds')
-            credentials: Optional[tuple[str, str]] = None
-            if isinstance(s.auth, tuple) and len(s.auth) == 2:
-                username, password = s.auth
-                if isinstance(username, str) and isinstance(password, str):
-                    credentials = (username, password)
             try:
-                s = start_session(credentials, s)
-            except (PermissionError, RuntimeError):
-                raise
+                s = start_session()
             except Exception:
                 logger.info('Trying re-login, wait 100 seconds')
                 time.sleep(100)
-                s = start_session(credentials, s)
+                s = start_session()
         logger.debug(f"Session (ID: {id(s)}) after check and relogin")
     return s
 
@@ -726,7 +737,7 @@ def simulate_multi_alpha(
         }
         for x in simulation_result["result"]
     ]
-    _ = [set_alpha_properties(s, x["id"]) for x in simulation_result["result"]]
+    # _ = [set_alpha_properties(s, x["id"]) for x in simulation_result["result"]]
     return result
 
 
@@ -882,7 +893,6 @@ def simulate_single_alpha(
 
     if not simulation_result["completed"]:
         return {"alpha_id": None, "simulate_data": simulate_data}
-    set_alpha_properties(s, simulation_result["result"]["id"])
     return {
         "alpha_id": simulation_result["result"]["id"],
         "simulate_data": simulate_data,
@@ -938,7 +948,7 @@ def simulate_alpha_list_multi(
     s: SingleSession,
     alpha_list: list,
     limit_of_concurrent_simulations: int = 3,
-    limit_of_multi_simulations: int = 3,
+    limit_of_multi_simulations: int = 10,
     simulation_config: dict = DEFAULT_CONFIG,
 ) -> list:
     """
@@ -958,21 +968,11 @@ def simulate_alpha_list_multi(
         requests.exceptions.RequestException: If there's an error in the API requests.
     """
     if (limit_of_multi_simulations < 2) or (limit_of_multi_simulations > 10):
-        logger.warning("Limit of multi-simulation should be 2..10, will be set to 3")
-        limit_of_multi_simulations = 3
+        logger.warning("Limit of multi-simulation should be 2..10, will be set to 10")
+        limit_of_multi_simulations = 10
     if (limit_of_concurrent_simulations < 1) or (limit_of_concurrent_simulations > 8):
         logger.warning("Limit of concurrent simulation should be 1..8, will be set to 3")
         limit_of_concurrent_simulations = 3
-    if len(alpha_list) < 10:
-        logger.warning(
-            "List of alphas too short, single concurrent simulations will be used instead of multisimulations"
-        )
-        return simulate_alpha_list(
-            s,
-            alpha_list,
-            limit_of_concurrent_simulations=limit_of_concurrent_simulations,
-            simulation_config=simulation_config,
-        )
     if any(d["type"] == "SUPER" for d in alpha_list):
         logger.warning("Multi-Simulation is not supported for SuperAlphas, single concurrent simulations will be used")
         return simulate_alpha_list(
@@ -1031,12 +1031,14 @@ def _delete_duplicates_from_result(result: list) -> list:
 def set_alpha_properties(
     s: SingleSession,
     alpha_id: str,
-    name: Optional[str] = None,
-    color: Optional[str] = None,
-    regular_desc: Optional[str] = None,
-    selection_desc: str = "None",
-    combo_desc: str = "None",
-    tags: list[str] = ["ace_tag"],
+    name: Union[str, object] = _UNSET,
+    color: Union[str, object] = _UNSET,
+    category: Union[Category, object] = _UNSET,
+    regular_desc: Union[str, object] = _UNSET,
+    selection_desc: Union[str, object] = _UNSET,
+    combo_desc: Union[str, object] = _UNSET,
+    osmosis_points: Union[int, object] = _UNSET,
+    tags: Union[list[str], object] = _UNSET,
 ) -> requests.Response:
     """
     Update the properties of an alpha.
@@ -1044,26 +1046,41 @@ def set_alpha_properties(
     Args:
         s (SingleSession): An authenticated session object.
         alpha_id (str): The ID of the alpha to update.
-        name (str, optional): The new name for the alpha. Defaults to None.
-        color (str, optional): The new color for the alpha. Defaults to None.
-        regular_desc (str, optional): Description for regular alpha. Defaults to None.
-        selection_desc (str, optional): Description for the selection part of a super alpha. Defaults to "None".
-        combo_desc (str, optional): Description for the combo part of a super alpha. Defaults to "None".
-        tags (list, optional): List of tags to apply to the alpha. Defaults to ["ace_tag"].
+        name (str, optional): The new name for the alpha. If not ptovided - is not changed.
+            If set to None - description is removed.
+        color (str, optional): The new color for the alpha. If not ptovided - is not changed.
+            If set to None - color is removed.
+        category (str, optional): Alpha category. If not ptovided - is not changed.
+            If set to None - category is removed.
+        regular_desc (str, optional): Description for regular alpha. If not ptovided - is not changed.
+            If set to None - description is removed.
+        selection_desc (str, optional): Description for the selection part of a super alpha. If not ptovided - is not changed.
+        combo_desc (str, optional): Description for the combo part of a super alpha. If not ptovided - is not changed.
+        osmosis_points (int, optional): Osmosis points, int from 1 to 100_000. If not ptovided - is not changed.
+            If set to None - points are removed.
+        tags (list, optional): List of tags to apply to the alpha. If not ptovided - is not changed.
+            If set to empty list - [] tags are removed.
 
     Returns:
         requests.Response: The response object from the API call.
     """
 
-    params = {
-        "color": color,
+    if osmosis_points is not _UNSET and osmosis_points is not None:
+        if not isinstance(osmosis_points, int):
+            raise TypeError(f"osmosis_points must be int or None, got {type(osmosis_points)!r}")
+        if not (1 <= osmosis_points <= 100_000):
+            raise ValueError(f"osmosis_points must be between 1 and 100000, got {osmosis_points}")
+    option_map = {
         "name": name,
+        "color": color,
+        "category": category,
         "tags": tags,
-        "category": None,
-        "regular": {"description": regular_desc},
-        "combo": {"description": combo_desc},
-        "selection": {"description": selection_desc},
+        "osmosisPoints": osmosis_points,
+        "regular": {"description": regular_desc} if regular_desc is not _UNSET else _UNSET,
+        "selection": {"description": selection_desc} if selection_desc is not _UNSET else _UNSET,
+        "combo": {"description": combo_desc} if combo_desc is not _UNSET else _UNSET,
     }
+    params = {k: v for k, v in option_map.items() if v is not _UNSET}
     response = s.patch(brain_api_url + "/alphas/" + alpha_id, json=params)
 
     return response
@@ -1146,13 +1163,51 @@ def get_alpha_yearly_stats(s: SingleSession, alpha_id: str) -> pd.DataFrame:
     return yearly_stats_df
 
 
+def _check_rate_limit(response: requests.Response) -> None:
+    """Sleep based on rate-limit headers."""
+
+    header_keys = {
+        "limit_minute": "x-ratelimit-limit-minute",
+        "remaining_minute": "x-ratelimit-remaining-minute",
+        "limit_second": "x-ratelimit-limit-second",
+        "remaining_second": "x-ratelimit-remaining-second",
+    }
+    parsed = {}
+    for key, header_name in header_keys.items():
+        val = response.headers.get(header_name)
+        if val is None:
+            logger.warning(f"Failed to parse rate-limit values: missing header {header_name}")
+            return
+        try:
+            parsed[key] = int(val)
+        except (ValueError, TypeError):
+            parsed[key] = 30
+            logger.warning(f"Failed to parse rate-limit values: cannot convert {header_name}={val} to int")
+            return
+    logger.debug(
+        f"""
+        Rate limit:
+        remaining_minute={parsed["remaining_minute"]},
+        limit_minute={parsed["limit_minute"]};
+        remaining_second={parsed["remaining_second"]},
+        limit_second={parsed["limit_second"]}
+        """
+    )
+    if parsed["remaining_second"] < 1:
+        logger.debug(f"Status code: {response.status_code}, sleep 1 sec")
+        time.sleep(1)
+    if parsed["remaining_minute"] <= 1:
+        logger.info(f"Rate limit {parsed["limit_minute"]} reached (per minute). Sleeping for a minute...")
+        time.sleep(60)
+
+
 def get_datasets(
     s: SingleSession,
     instrument_type: str = "EQUITY",
     region: str = "USA",
     delay: int = 1,
     universe: str = "TOP3000",
-    theme: str = "false",
+    theme: Optional[bool] = None,
 ) -> pd.DataFrame:
     """
     Retrieve available datasets based on specified parameters.
@@ -1163,7 +1218,11 @@ def get_datasets(
         region (str, optional): The region. Defaults to "USA".
         delay (int, optional): The delay. Defaults to 1.
         universe (str, optional): The universe. Defaults to "TOP3000".
-        theme (str, optional): The theme. Defaults to "false".
+        theme (bool | None, optional):
+            - True  -> return only datasets that are in a theme
+            - False -> return only datasets that are not in a theme
+            - None  -> ignore theme filter (all datasets)
+          Defaults to None.
 
     Returns:
         pandas.DataFrame: A DataFrame containing information about available datasets.
@@ -1171,9 +1230,13 @@ def get_datasets(
     url = (
         brain_api_url
         + "/data-sets?"
-        + f"instrumentType={instrument_type}&region={region}&delay={str(delay)}&universe={universe}&theme={theme}"
+        + f"instrumentType={instrument_type}&region={region}&delay={delay}&universe={universe}"
     )
+    if theme is not None:
+        theme_str = "true" if theme else "false"
+        url += f"&theme={theme_str}"
     result = s.get(url)
+    _check_rate_limit(result)
     datasets_df = pd.DataFrame(result.json()["results"])
     datasets_df = expand_dict_columns(datasets_df)
     return datasets_df
@@ -1185,9 +1248,6 @@ def get_datafields(
     region: str = "USA",
     delay: int = 1,
     universe: str = "TOP3000",
-    theme: str = "false",
-    dataset_id: str = "",
-    data_type: str = "MATRIX",
     search: str = "",
 ) -> pd.DataFrame:
     """
@@ -1196,59 +1256,41 @@ def get_datafields(
     Args:
         s (SingleSession): An authenticated session object.
         instrument_type (str, optional): The type of instrument. Defaults to "EQUITY".
-        region (str, optional): The region. Defaults to "USA".
-        delay (int, optional): The delay. Defaults to 1.
-        universe (str, optional): The universe. Defaults to "TOP3000".
-        theme (str, optional): The theme. Defaults to "false".
-        dataset_id (str, optional): The ID of a specific dataset. Defaults to "".
-        data_type (str, optional): The type of data. Defaults to "MATRIX".
+        region (str): The region. Defaults to "USA".
+        delay (int): The delay. Defaults to 1.
+        universe (str): The universe. Defaults to "TOP3000".
         search (str, optional): A search string to filter datafields. Defaults to "".
 
     Returns:
         pandas.DataFrame: A DataFrame containing information about available datafields.
     """
-    type_param = f"&type={data_type}" if data_type != "ALL" else ""
+
+    base = (
+        brain_api_url
+        + "/data-fields?"
+        + f"&instrumentType={instrument_type}"
+        + f"&region={region}"
+        + f"&delay={delay}"
+        + f"&universe={universe}"
+    )
+
     if len(search) == 0:
-        url_template = (
-            brain_api_url
-            + "/data-fields?"
-            + f"&instrumentType={instrument_type}"
-            + f"&region={region}&delay={str(delay)}&universe={universe}{type_param}&dataset.id={dataset_id}&limit=50"
-            + "&offset={x}"
-        )
-        count = s.get(url_template.format(x=0)).json()["count"]
-        if count == 0:
-            logger.warning(
-                f"No fields found: region={region}, delay={str(delay)}, universe={universe}, "
-                f"type={data_type}, dataset.id={dataset_id}"
-            )
-            return pd.DataFrame()
+        logger.info(f"Getting fields for: region={region}, delay={delay}, universe={universe}")
+        result = s.get(base)
+        logger.debug(f"Get datafields, status_code:{result.status_code}")
+        _check_rate_limit(result)
+        datafields = result.json()["results"]
 
     else:
-        url_template = (
-            brain_api_url
-            + "/data-fields?"
-            + f"&instrumentType={instrument_type}"
-            + f"&region={region}&delay={str(delay)}&universe={universe}{type_param}&limit=50"
-            + f"&search={search}"
-            + "&offset={x}"
+        logger.info(
+            f"Getting fields for: region={region}, delay={delay}, universe={universe}, search key word: {search}"
         )
-        count = 100
+        url_template = base + "&limit=50" + f"&search={search}" + "&offset=0"
+        result = s.get(url_template)
+        _check_rate_limit(result)
+        datafields = result.json()["results"]
 
-    max_try = 5
-    datafields_list = []
-    for x in range(0, count, 50):
-        for _ in range(max_try):
-            datafields = s.get(url_template.format(x=x))
-            if "results" in datafields.json():
-                break
-            time.sleep(5)
-
-        datafields_list.append(datafields.json()["results"])
-
-    datafields_list_flat = [item for sublist in datafields_list for item in sublist]
-
-    datafields_df = pd.DataFrame(datafields_list_flat)
+    datafields_df = pd.DataFrame(datafields)
     datafields_df = expand_dict_columns(datafields_df)
     return datafields_df
 
@@ -1288,9 +1330,7 @@ def get_instrument_type_region_delay(s: SingleSession) -> pd.DataFrame:
     of instrument type, region, and delay. This list is then converted into a DataFrame and returned.
     """
 
-    settings_options = s.options('https://api.worldquantbrain.com/simulations').json()['actions']['POST']['settings'][
-        'children'
-    ]
+    settings_options = s.options(brain_api_url + '/simulations').json()['actions']['POST']['settings']['children']
     data = [
         {settings_options[key]['label']: settings_options[key]['choices']}
         for key in settings_options.keys()
@@ -1329,8 +1369,13 @@ def get_instrument_type_region_delay(s: SingleSession) -> pd.DataFrame:
                 ]
                 data_list.append(row)
 
-    df = pd.DataFrame(data_list).sort_values(
-        by=['InstrumentType', 'Region', 'Delay'], ascending=False, ignore_index=True
+    df = (
+        pd.DataFrame(data_list)
+        .sort_values(
+            by=['InstrumentType', 'Region', 'Delay'],
+            ascending=False,
+        )
+        .reset_index(drop=True)
     )
     return df
 
@@ -1373,3 +1418,72 @@ def performance_comparison(
         return {}
 
     return result.json()
+
+
+
+
+def construct_selection_expression(
+    selection: str,
+    instrument_type: Literal["EQUITY"] = "EQUITY",
+    region: str = "USA",
+    delay: Literal[0, 1] = 1,
+    selection_limit: int = 1000,
+    selection_handling: str = "POSITIVE",
+) -> dict:
+    """
+    Construct a dictionary containing parameters for a selection expression.
+
+    This function creates a dictionary with the necessary parameters to define
+    a selection expression for use in super alpha simulations.
+
+    Args:
+        selection (str): The selection expression to be used.
+        instrument_type (str, optional): Instrument type to use.
+            Defaults to "EQUITY".
+        region (str, optional): The geographic region for the selection.
+            Defaults to "USA".
+        delay (int, optional): The delay parameter for the selection.
+            Defaults to 1.
+        selection_limit (int, optional): The maximum number of instruments
+            to be selected. Defaults to 1000.
+        selection_handling (str, optional): The method for handling the
+            selection. Defaults to "POSITIVE".
+
+    Returns:
+        dict: A dictionary containing the constructed selection expression
+        parameters, ready to be used in API calls or other functions.
+    """
+    selection_data = {
+        "settings.instrumentType": instrument_type,
+        "settings.region": region,
+        "settings.delay": delay,
+        "selection": selection,
+        "limit": 10,
+        "selectionLimit": selection_limit,
+        "selectionHandling": selection_handling,
+    }
+    return selection_data
+
+
+def run_selection(s: SingleSession, selection_data: dict) -> dict:
+    """
+    Run a selection simulation using the provided selection data.
+
+    Args:
+        s (SingleSession): An authenticated session object.
+        selection_data (dict): A dictionary containing the selection parameters.
+
+    Returns:
+        dict: A dictionary containing the count of selected alphas and any messages.
+
+    Raises:
+        requests.exceptions.RequestException: If there's an error in the API request.
+    """
+    selection_response = s.get(brain_api_url + "/simulations/super-selection", params=selection_data)
+    r = selection_response.json()
+    selected_alphas_count = r.get("count")
+    message = r.get("message", "")
+    time.sleep(2)
+    return {"selected_alphas_count": selected_alphas_count, "message": message}
+
+

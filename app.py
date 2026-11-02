@@ -4,21 +4,16 @@ import os
 import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
-
 import pandas as pd
 import requests
 import streamlit as st
 from google import genai
-
 import ace_lib as ace
 
 
-DEFAULT_REGION = "GLB"
-DEFAULT_UNIVERSE = "MINVOL1M"
-DEFAULT_DATASET_IDS = (
-    "pv1, model110, model77, model26, model109, risk70, model38, model50, "
-    "analyst69, model264, other460, fundamental23, other455, model138"
-)
+DEFAULT_REGION = "HKG"
+DEFAULT_UNIVERSE = "TOP800"
+DEFAULT_DATASET_IDS = "fundamental17, other466, fundamental86"
 ALPHA_SCHEMA = {
     "type": "object",
     "properties": {
@@ -207,7 +202,9 @@ def _build_initial_prompt(
             "VECTOR fields must first be wrapped with vec_count, vec_max, vec_sum, vec_avg, vec_stddev, vec_min, or vec_range.",
             "GROUP fields may only be used as the group parameter of group operators.",
             "Use ts_backfill for low-coverage MATRIX fields when useful.",
+            "Prefer underused fields with low alphaCount and build complex expressions that combine multiple operators.",
             "Prefer expressions based on a single dataset where possible.",
+            "Do not use pv1 fields by themselves; combine any pv1 field with at least one non-pv1 field.",
             f"Generate {num_alphas} new alpha expressions.",
         ]
     )
@@ -222,9 +219,9 @@ def _build_variation_prompt(
 ) -> str:
     best = sorted(
         (alpha for alpha in previous_alphas if alpha.get("sharpe") is not None),
-        key=lambda alpha: abs(alpha["sharpe"]),
+        key=lambda alpha: alpha["sharpe"],
         reverse=True,
-    )[:5]
+    )[:3]
     return "\n".join(
         [
             "Generate variations of the previous alpha expressions.",
@@ -237,6 +234,8 @@ def _build_variation_prompt(
             "VECTOR fields must first be wrapped with vec_count, vec_max, vec_sum, vec_avg, vec_stddev, vec_min, or vec_range.",
             "GROUP fields may only be used as the group parameter of group operators.",
             "Use ts_backfill for low-coverage MATRIX fields when useful.",
+            "Prefer underused fields with low alphaCount and build complex expressions that combine multiple operators.",
+            "Do not use pv1 fields by themselves; combine any pv1 field with at least one non-pv1 field.",
             "Return only JSON matching the schema.",
             f"Generate {num_alphas} new expressions with a brief rationale.",
         ]
@@ -301,22 +300,21 @@ def _stat_value(stats: Any, name: str) -> float | None:
 def _fetch_data_fields(
     session: ace.SingleSession, region: str, universe: str, dataset_ids: list[str]
 ) -> pd.DataFrame:
-    frames = [
-        ace.get_datafields(
-            session,
-            region=region,
-            universe=universe,
-            dataset_id=dataset_id,
-            data_type="ALL",
-            delay=1,
-        )
-        for dataset_id in dataset_ids
-    ]
-    fields = pd.concat(frames, ignore_index=True)
+    fields = ace.get_datafields(
+        session,
+        region=region,
+        universe=universe,
+        delay=1,
+    )
     if fields.empty:
         raise RuntimeError("No data fields were returned for these region, universe, and dataset IDs.")
+    if "dataset_id" not in fields.columns:
+        raise RuntimeError("The data fields response did not include dataset IDs.")
+    fields = fields[fields["dataset_id"].isin(dataset_ids)].reset_index(drop=True)
+    if fields.empty:
+        raise RuntimeError("No data fields were returned for the selected dataset IDs.")
     if "alphaCount" in fields.columns:
-        fields = fields[fields["alphaCount"] < 50].reset_index(drop=True)
+        fields = fields[fields["alphaCount"] < 20].reset_index(drop=True)
     fields = fields.drop(
         columns=[
             "subcategory",
@@ -326,7 +324,6 @@ def _fetch_data_fields(
             "universe",
             "pyramidMultiplier",
             "themes",
-            "dataset_id",
             "category_id",
             "category_name",
             "subcategory_id",
@@ -338,7 +335,7 @@ def _fetch_data_fields(
         errors="ignore",
     )
     if fields.empty:
-        raise RuntimeError("No data fields remain after filtering out fields used by 50 or more alphas.")
+        raise RuntimeError("No data fields remain after filtering out fields used by 20 or more alphas.")
     return fields
 
 
@@ -378,6 +375,7 @@ def run_workflow(
                 neutralization=neutralization,
                 max_trade="OFF",
                 delay=1,
+                simulation_mode="QUICK",
                 visualization=False,
             )
             for alpha in generated
@@ -440,8 +438,8 @@ def _capture_workflow_request() -> None:
         "region": st.session_state.get("region_input", "").strip(),
         "universe": st.session_state.get("universe_input", "").strip(),
         "dataset_ids": st.session_state.get("dataset_ids_input", ""),
-        "iterations": st.session_state.get("iterations_input", 2),
-        "num_alphas": st.session_state.get("num_alphas_input", 10),
+        "iterations": st.session_state.get("iterations_input", 3),
+        "num_alphas": st.session_state.get("num_alphas_input", 50),
         "initial_description": st.session_state.get("description_input", "").strip(),
     }
     st.session_state["gemini_api_key_input"] = ""
@@ -468,8 +466,8 @@ def _render_workflow() -> None:
                 help="Used only for this run; it is not written to a file.",
             )
         st.text_input("Gemini model", "gemini-2.5-flash", key="gemini_model_input")
-        st.number_input("Iterations", min_value=1, max_value=5, value=2, key="iterations_input")
-        st.number_input("Alphas per iteration", min_value=1, max_value=30, value=10, key="num_alphas_input")
+        st.number_input("Iterations", min_value=1, max_value=5, value=3, key="iterations_input")
+        st.number_input("Alphas per iteration", min_value=1, max_value=50, value=50, key="num_alphas_input")
         st.text_input(
             "Initial generation direction",
             "Start with simple expressions using available data fields.",
