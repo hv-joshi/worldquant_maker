@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101b2c">
+    <meta name="description" content="Generate and simulate WorldQuant BRAIN alpha expressions.">
+    <title>BRAIN Alpha Generator</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="top">
+        <div class="brand-mark" aria-hidden="true">B</div>
+        <div>
+          <p class="eyebrow">RESEARCH WORKSPACE</p>
+          <h1>BRAIN Alpha Generator</h1>
+          <p class="subtitle">Generate expressions and run simulations with your own accounts.</p>
+        </div>
+      </header>
+
+      <section id="access-card" class="card">
+        <h2>App access</h2>
+        <p>Enter the password configured for this deployment.</p>
+        <form id="access-form" class="stack">
+          <label for="app-password">App password</label>
+          <input id="app-password" type="password" autocomplete="current-password" required>
+          <button type="submit">Unlock</button>
+        </form>
+      </section>
+
+      <section id="brain-card" class="card hidden">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">ACCOUNT</p>
+            <h2>WorldQuant BRAIN</h2>
+          </div>
+          <button id="sign-out" class="button-secondary hidden" type="button">Sign out</button>
+        </div>
+        <p id="brain-status" class="muted">Sign in to continue.</p>
+        <form id="login-form" class="stack">
+          <label for="brain-email">Email</label>
+          <input id="brain-email" type="email" autocomplete="username" required>
+          <label for="brain-password">Password</label>
+          <input id="brain-password" type="password" autocomplete="current-password" required>
+          <button type="submit">Sign in</button>
+        </form>
+        <div id="biometric-panel" class="hidden stack">
+          <a id="approval-link" class="button-link" target="_blank" rel="noopener noreferrer">Open biometric approval</a>
+          <button id="check-biometric" type="button">I approved — check sign-in</button>
+        </div>
+      </section>
+
+      <section id="run-card" class="card hidden">
+        <p class="eyebrow">SIMULATION SETUP</p>
+        <h2>Initial parameters</h2>
+        <form id="run-form" class="stack">
+          <label for="region">Region (rg)</label>
+          <input id="region" value="GLB" maxlength="32" required>
+          <label for="universe">Universe (un)</label>
+          <input id="universe" value="MINVOL1M" maxlength="64" required>
+          <label for="datasets">Dataset IDs</label>
+          <textarea id="datasets" rows="3" required>pv1, model110, model77, model26, model109, risk70, model38, model50, analyst69, model264, other460, fundamental23, other455, model138</textarea>
+          <label for="gemini-key">Gemini API key <span id="key-configured" class="muted"></span></label>
+          <input id="gemini-key" type="password" autocomplete="off" placeholder="Needed unless configured on the server">
+          <div class="split">
+            <div class="stack compact">
+              <label for="iterations">Iterations (1–2)</label>
+              <input id="iterations" type="number" min="1" max="2" value="1" required>
+            </div>
+            <div class="stack compact">
+              <label for="alpha-count">Alphas per iteration (1–5)</label>
+              <input id="alpha-count" type="number" min="1" max="5" value="3" required>
+            </div>
+          </div>
+          <label for="direction">Generation direction</label>
+          <input id="direction" value="Start with simple expressions using available data fields." maxlength="1000" required>
+          <button id="run-button" type="submit">Generate and simulate</button>
+        </form>
+        <p class="notice">Runs are capped to fit serverless execution limits. Each expression is tested with both Statistical and Subindustry neutralization.</p>
+      </section>
+
+      <section id="results" class="results" aria-live="polite"></section>
+      <div id="message" class="message hidden" role="status"></div>
+      <footer>Use over HTTPS only. Your BRAIN credentials are encrypted between requests and are not saved to disk.</footer>
+    </main>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
