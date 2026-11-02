@@ -25,16 +25,17 @@ Then open `http://<computer-local-IP>:8501` on the phone. The computer and phone
 
 ## Deploy to Vercel
 
-This repository includes a Vercel serverless API and a static, mobile-friendly web interface. The local Streamlit app remains available separately.
+This repository includes a Vercel serverless API and a React frontend built with Vite. The local Streamlit app remains available separately.
 
 1. Push the project to a GitHub repository and import it in Vercel.
-2. Keep the project root as the Vercel root directory. `pyproject.toml` selects the FastAPI entrypoint; `public/` is served as static frontend assets.
+2. Keep the project root as the Vercel root directory. Vercel builds the React frontend with `npm run build` into `dist/`; `pyproject.toml` selects the FastAPI entrypoint at `api/index.py`.
 3. In **Project → Settings → Environment Variables**, set:
    - `APP_PASSWORD`: a long, unique password to protect the hosted app.
    - `VERCEL_SESSION_SECRET`: a randomly generated secret with at least 32 characters. For example, generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
    - `GENAI_API_KEY`: optional. Set this to keep the Gemini key server-side; otherwise, users enter a key for each run.
-4. Deploy with the default Vercel build settings.
-5. Open the deployment's HTTPS URL, enter the app password, and sign in to WorldQuant BRAIN.
+4. Ensure the deployment includes both `package.json` and `requirements.txt`. React is only the frontend; the API still runs on Python and requires the packages listed in `requirements.txt`.
+5. Deploy. `vercel.json` configures the frontend build command and output directory.
+6. Open the deployment's HTTPS URL, enter the app password, and sign in to WorldQuant BRAIN.
 
 The API encrypts the BRAIN credentials and session cookies in a short-lived token held in browser memory. Do not use a weak or shared `VERCEL_SESSION_SECRET`; changing it invalidates existing tokens. Each run is capped at 2 iterations and 5 expressions per iteration, and the function has a 60-second timeout to support Vercel Hobby deployments. BRAIN simulations can exceed that limit; reduce the run size or use a plan that allows a longer function duration and increase `maxDuration` in `vercel.json` accordingly. This app does not persist run history between page reloads.
 
