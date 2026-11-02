@@ -33,7 +33,7 @@ This repository includes a Vercel serverless API and a React frontend built with
    - `APP_PASSWORD`: a long, unique password to protect the hosted app.
    - `VERCEL_SESSION_SECRET`: a randomly generated secret with at least 32 characters. For example, generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
    - `GENAI_API_KEY`: optional. Set this to keep the Gemini key server-side; otherwise, users enter a key for each run.
-4. Ensure the deployment includes both `package.json` and `requirements.txt`. React is only the frontend; the API still runs on Python and requires the packages listed in `requirements.txt`.
+4. Ensure the deployment includes `package.json`, `pyproject.toml`, and `requirements.txt`. Python runtime packages are declared in both Python dependency manifests; React packages are declared in `package.json`.
 5. Deploy. `vercel.json` configures the frontend build command and output directory.
 6. Open the deployment's HTTPS URL, enter the app password, and sign in to WorldQuant BRAIN.
 
